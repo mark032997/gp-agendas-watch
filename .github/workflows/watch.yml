@@ -2,7 +2,8 @@ name: Watch GP Agendas 2026
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
+    # Every 2 hours at minute 0 (UTC)
+    - cron: "0 */2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -23,6 +24,8 @@ jobs:
       - name: Run checker
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Heartbeat only when you click “Run workflow”
+          FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: |
           python check_gp_agendas_2026.py
 
