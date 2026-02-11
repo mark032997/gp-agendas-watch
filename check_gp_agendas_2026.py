@@ -23,6 +23,7 @@ FORM = {
 
 STATE_FILE = "state.json"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+FORCE_NOTIFY = os.environ.get("FORCE_NOTIFY", "").strip() in ("1", "true", "TRUE", "yes", "YES")
 
 def http_post_json(url: str, form: dict) -> dict:
     data = urllib.parse.urlencode(form).encode("utf-8")
@@ -33,7 +34,7 @@ def http_post_json(url: str, form: dict) -> dict:
         headers={
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "Accept": "application/json, text/plain, */*",
-            "User-Agent": "gp-agendas-watch/1.0",
+            "User-Agent": "gp-agendas-watch/1.1",
         },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -56,29 +57,16 @@ def extract_docs(payload: dict):
     for d in docs:
         doc_id = d.get("ID")
         name = d.get("DisplayName") or d.get("Name") or "(unnamed)"
-        # Some CivicPlus installs provide a direct file URL; if not, we still alert with name+id.
         file_url = d.get("FileUrl") or d.get("Url") or ""
         extracted.append({"id": doc_id, "name": name, "url": file_url})
-    # stable sort for deterministic diffing
     extracted.sort(key=lambda x: (x["id"] if x["id"] is not None else 0, x["name"]))
     return extracted
 
-def discord_notify(new_docs):
+def discord_post(text: str):
     if not DISCORD_WEBHOOK_URL:
-        print("DISCORD_WEBHOOK_URL not set; skipping Discord notify.")
+        print("DISCORD_WEBHOOK_URL not set; cannot post to Discord.")
         return
-
-    lines = []
-    for doc in new_docs:
-        if doc["url"]:
-            lines.append(f"- **{doc['name']}**  ({doc['url']})")
-        else:
-            lines.append(f"- **{doc['name']}**  (ID: {doc['id']})")
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    content = "📄 **New document(s) in Galena Park → Agendas → 2026**\n" + "\n".join(lines) + f"\n\nChecked: {now}"
-
-    data = json.dumps({"content": content}).encode("utf-8")
+    data = json.dumps({"content": text}).encode("utf-8")
     req = urllib.request.Request(
         DISCORD_WEBHOOK_URL,
         data=data,
@@ -92,34 +80,65 @@ def main():
     payload = http_post_json(URL, FORM)
     docs = extract_docs(payload)
 
-    state = load_state()
-    seen = set(state.get("seen_ids", []))
-
     current_ids = [d["id"] for d in docs if d["id"] is not None]
     current_set = set(current_ids)
 
-    # First run: populate state, no alert (prevents spam)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    state = load_state()
+    seen = set(state.get("seen_ids", []))
+
+    # First run: initialize state
     if not seen:
         state["seen_ids"] = sorted(list(current_set))
         save_state(state)
-        print(f"Initialized state with {len(current_set)} document IDs.")
+        msg = f"✅ GP Agendas 2026 watcher initialized. Found {len(current_set)} docs. ({now})"
+        print(msg)
+        if FORCE_NOTIFY:
+            discord_post(msg)
         return
 
     new_ids = current_set - seen
     if new_ids:
         new_docs = [d for d in docs if d["id"] in new_ids]
-        discord_notify(new_docs)
+        lines = []
+        for doc in new_docs:
+            if doc["url"]:
+                lines.append(f"- **{doc['name']}** ({doc['url']})")
+            else:
+                lines.append(f"- **{doc['name']}** (ID: {doc['id']})")
+        msg = "📄 **New document(s) in Galena Park → Agendas → 2026**\n" + "\n".join(lines) + f"\n\nChecked: {now}"
+        discord_post(msg)
+        print(f"Found {len(new_docs)} new docs; notified.")
 
-        # update state
         state["seen_ids"] = sorted(list(current_set))
         save_state(state)
-        print(f"Found {len(new_docs)} new docs; notified and updated state.")
-    else:
-        print("No new documents.")
+        return
+
+    # No new docs
+    msg = f"✅ GP Agendas 2026 check OK — no changes. Total docs: {len(current_set)}. ({now})"
+    print(msg)
+    if FORCE_NOTIFY:
+        discord_post(msg)
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        err = f"❌ GP Agendas 2026 watcher ERROR: {e}"
+        print(err, file=sys.stderr)
+        # Try to post errors too (helps debugging)
+        try:
+            if os.environ.get("DISCORD_WEBHOOK_URL", "").strip():
+                data = json.dumps({"content": err}).encode("utf-8")
+                req = urllib.request.Request(
+                    os.environ["DISCORD_WEBHOOK_URL"].strip(),
+                    data=data,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    resp.read()
+        except Exception:
+            pass
         sys.exit(1)
