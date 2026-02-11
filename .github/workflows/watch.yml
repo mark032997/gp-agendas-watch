@@ -4,6 +4,13 @@ on:
   schedule:
     # Every 2 hours at minute 0 (UTC)
     - cron: "0 */2 * * *"
+
+    # Daily checks that cover 7pm America/Chicago across DST:
+    # 7pm CST = 01:00 UTC next day
+    # 7pm CDT = 00:00 UTC next day
+    - cron: "0 0 * * *"
+    - cron: "0 1 * * *"
+
   workflow_dispatch:
 
 permissions:
@@ -24,8 +31,12 @@ jobs:
       - name: Run checker
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          # Heartbeat only when you click “Run workflow”
+
+          # Heartbeat only on manual runs
           FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+
+          # Only mark as "daily" on the daily cron schedules (not the every-2-hours schedule)
+          DAILY_CHECK: ${{ (github.event_name == 'schedule' && (github.event.schedule == '0 0 * * *' || github.event.schedule == '0 1 * * *')) && '1' || '0' }}
         run: |
           python check_gp_agendas_2026.py
 
